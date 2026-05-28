@@ -1,0 +1,124 @@
+name: Reusable Publish UPM Release
+
+on:
+  workflow_call:
+    inputs:
+      package_json_path:
+        description: "Path to the Unity package.json file."
+        required: false
+        type: string
+        default: "package.json"
+      source_prefix:
+        description: "Prefix for the generated source archive. Defaults to the package name."
+        required: false
+        type: string
+        default: ""
+      release_notes_limit:
+        description: "Number of recent commits to include when no previous tag exists."
+        required: false
+        type: number
+        default: 20
+    outputs:
+      released:
+        description: "true if a new release was created."
+        value: ${{ jobs.publish-release.outputs.released }}
+      tag:
+        description: "Package version tag."
+        value: ${{ jobs.publish-release.outputs.tag }}
+      version:
+        description: "Package version."
+        value: ${{ jobs.publish-release.outputs.version }}
+
+permissions:
+  contents: write
+
+jobs:
+  publish-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      released: ${{ steps.result.outputs.released }}
+      tag: ${{ steps.package.outputs.tag }}
+      version: ${{ steps.package.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Force fetch tags
+        run: git fetch --tags --force
+
+      - name: Read package version
+        id: package
+        shell: bash
+        run: |
+          package_json="${{ inputs.package_json_path }}"
+          version="$(python -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' "$package_json")"
+          name="$(python -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["name"])' "$package_json")"
+          tag="${version}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether version tag exists
+        id: tag
+        shell: bash
+        run: |
+          if git rev-parse -q --verify "refs/tags/${{ steps.package.outputs.tag }}" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build source artifact
+        if: steps.tag.outputs.exists == 'false'
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          prefix="${{ inputs.source_prefix }}"
+          if [ -z "$prefix" ]; then
+            prefix="${{ steps.package.outputs.name }}"
+          fi
+          git archive --format=zip --output="artifacts/${prefix}-${{ steps.package.outputs.version }}-source.zip" HEAD
+
+      - name: Generate release notes
+        if: steps.tag.outputs.exists == 'false'
+        shell: bash
+        run: |
+          previous_tag="$(git tag --sort=-creatordate | head -n 1 || true)"
+          {
+            echo "## Changes"
+            echo
+            if [ -n "$previous_tag" ]; then
+              git log "${previous_tag}..HEAD" --pretty=format:"- %s (%h)"
+            else
+              git log -n "${{ inputs.release_notes_limit }}" --pretty=format:"- %s (%h)"
+            fi
+            echo
+            echo
+            echo "## Artifacts"
+            echo
+            echo "- Source archive"
+          } > release-notes.md
+
+      - name: Create GitHub Release
+        if: steps.tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.tag }}
+          name: ${{ steps.package.outputs.version }}
+          body_path: release-notes.md
+          files: artifacts/*
+
+      - name: Set result
+        id: result
+        shell: bash
+        run: |
+          if [ "${{ steps.tag.outputs.exists }}" = "false" ]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${{ steps.package.outputs.tag }} already exists. Release skipped."
+          fi
