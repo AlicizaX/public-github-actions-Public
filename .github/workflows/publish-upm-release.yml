@@ -130,6 +130,25 @@ jobs:
         shell: bash
         run: upm --help
 
+      - name: Show UPM signing configuration summary
+        if: steps.tag.outputs.exists == 'false' && inputs.sign_upm_package
+        shell: bash
+        env:
+          UPM_SERVICE_ACCOUNT_KEY_ID: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_ID }}
+          UPM_SERVICE_ACCOUNT_KEY_SECRET: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_SECRET }}
+          UPM_ORG_ID: ${{ secrets.UPM_ORG_ID }}
+        run: |
+          echo "UPM_ORG_ID=${UPM_ORG_ID}"
+          echo "UPM_SERVICE_ACCOUNT_KEY_ID prefix=${UPM_SERVICE_ACCOUNT_KEY_ID:0:8}"
+          echo "UPM_SERVICE_ACCOUNT_KEY_ID length=${#UPM_SERVICE_ACCOUNT_KEY_ID}"
+          echo "UPM_SERVICE_ACCOUNT_KEY_SECRET length=${#UPM_SERVICE_ACCOUNT_KEY_SECRET}"
+          if [[ ! "$UPM_SERVICE_ACCOUNT_KEY_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+            echo "::warning::UPM_SERVICE_ACCOUNT_KEY_ID does not look like a Unity service account Key ID UUID."
+          fi
+          if [[ ! "$UPM_ORG_ID" =~ ^[0-9]+$ ]]; then
+            echo "::warning::UPM_ORG_ID does not look like the numeric Unity Organization ID."
+          fi
+
       - name: Pack and sign UPM package
         if: steps.tag.outputs.exists == 'false' && inputs.sign_upm_package
         id: upm
