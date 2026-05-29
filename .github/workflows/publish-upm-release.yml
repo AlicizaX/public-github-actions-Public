@@ -18,6 +18,11 @@ on:
         required: false
         type: number
         default: 20
+      keep_releases:
+        description: "Number of latest GitHub Releases to keep after publishing. Set 0 to disable cleanup."
+        required: false
+        type: number
+        default: 3
     outputs:
       released:
         description: "true if a new release was created."
@@ -111,6 +116,24 @@ jobs:
           name: ${{ steps.package.outputs.version }}
           body_path: release-notes.md
           files: artifacts/*
+
+      - name: Delete old GitHub Releases
+        if: steps.tag.outputs.exists == 'false' && inputs.keep_releases > 0
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP_RELEASES: ${{ inputs.keep_releases }}
+        run: |
+          gh release list --limit 1000 --json tagName,createdAt \
+            --jq "sort_by(.createdAt) | reverse | .[$KEEP_RELEASES:] | .[].tagName" \
+            > old-release-tags.txt
+
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then
+              gh release delete "$tag" --yes
+              git push origin ":refs/tags/$tag"
+            fi
+          done < old-release-tags.txt
 
       - name: Set result
         id: result

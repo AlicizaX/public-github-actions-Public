@@ -14,6 +14,9 @@ Behavior:
 - Generates a source archive from the current commit.
 - Builds release notes from commits since the previous tag, or from recent
   commits when no previous tag exists.
+- Deletes older GitHub Releases after publishing, keeping only the newest three
+  releases by default.
+- Deletes the Git tags that belong to deleted GitHub Releases.
 
 Caller workflow:
 
@@ -38,3 +41,5 @@ Repository settings:
 
 - Actions workflow permissions must allow `Read and write permissions`.
 - Tags use the raw package version, for example `2.0.1`.
+- `keep_releases` defaults to `3`. Set it to `0` only if cleanup should be
+  disabled. Deleted releases have their Git tags deleted too.
