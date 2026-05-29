@@ -18,21 +18,6 @@ on:
         required: false
         type: number
         default: 20
-      sign_upm_package:
-        description: "Pack and sign a Unity Package Manager tarball for GitHub Release assets."
-        required: false
-        type: boolean
-        default: true
-    secrets:
-      UPM_SERVICE_ACCOUNT_KEY_ID:
-        description: "Unity service account key id used by the UPM CLI."
-        required: false
-      UPM_SERVICE_ACCOUNT_KEY_SECRET:
-        description: "Unity service account key secret used by the UPM CLI."
-        required: false
-      UPM_ORG_ID:
-        description: "Unity organization id that signs the UPM package."
-        required: false
     outputs:
       released:
         description: "true if a new release was created."
@@ -98,95 +83,6 @@ jobs:
           fi
           git archive --format=zip --output="artifacts/${prefix}-${{ steps.package.outputs.version }}-source.zip" HEAD
 
-      - name: Check UPM signing secrets
-        if: steps.tag.outputs.exists == 'false' && inputs.sign_upm_package
-        shell: bash
-        env:
-          UPM_SERVICE_ACCOUNT_KEY_ID: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_ID }}
-          UPM_SERVICE_ACCOUNT_KEY_SECRET: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_SECRET }}
-          UPM_ORG_ID: ${{ secrets.UPM_ORG_ID }}
-        run: |
-          missing=0
-          for name in UPM_SERVICE_ACCOUNT_KEY_ID UPM_SERVICE_ACCOUNT_KEY_SECRET UPM_ORG_ID; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing GitHub Actions secret: ${name}"
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            exit 1
-          fi
-
-      - name: Install Unity UPM CLI
-        if: steps.tag.outputs.exists == 'false' && inputs.sign_upm_package
-        shell: bash
-        run: |
-          curl -fsSL https://cdn.packages.unity.com/upm-cli/install.sh -o install-upm-cli.sh
-          bash install-upm-cli.sh
-          echo "$HOME/.upm/bin" >> "$GITHUB_PATH"
-
-      - name: Verify Unity UPM CLI
-        if: steps.tag.outputs.exists == 'false' && inputs.sign_upm_package
-        shell: bash
-        run: upm --help
-
-      - name: Show UPM signing configuration summary
-        if: steps.tag.outputs.exists == 'false' && inputs.sign_upm_package
-        shell: bash
-        env:
-          UPM_SERVICE_ACCOUNT_KEY_ID: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_ID }}
-          UPM_SERVICE_ACCOUNT_KEY_SECRET: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_SECRET }}
-          UPM_ORG_ID: ${{ secrets.UPM_ORG_ID }}
-        run: |
-          echo "UPM_ORG_ID=${UPM_ORG_ID}"
-          echo "UPM_SERVICE_ACCOUNT_KEY_ID prefix=${UPM_SERVICE_ACCOUNT_KEY_ID:0:8}"
-          echo "UPM_SERVICE_ACCOUNT_KEY_ID length=${#UPM_SERVICE_ACCOUNT_KEY_ID}"
-          echo "UPM_SERVICE_ACCOUNT_KEY_SECRET length=${#UPM_SERVICE_ACCOUNT_KEY_SECRET}"
-          if [[ ! "$UPM_SERVICE_ACCOUNT_KEY_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
-            echo "::warning::UPM_SERVICE_ACCOUNT_KEY_ID does not look like a Unity service account Key ID UUID."
-          fi
-          if [[ ! "$UPM_ORG_ID" =~ ^[0-9]+$ ]]; then
-            echo "::warning::UPM_ORG_ID does not look like the numeric Unity Organization ID."
-          fi
-          echo "UPM_ORG_ID length=${#UPM_ORG_ID}"
-
-      - name: Pack and sign UPM package
-        if: steps.tag.outputs.exists == 'false' && inputs.sign_upm_package
-        id: upm
-        shell: bash
-        env:
-          UPM_SERVICE_ACCOUNT_KEY_ID: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_ID }}
-          UPM_SERVICE_ACCOUNT_KEY_SECRET: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_SECRET }}
-          UPM_ORG_ID: ${{ secrets.UPM_ORG_ID }}
-          UGS_CLI_SERVICE_KEY_ID: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_ID }}
-          UGS_CLI_SERVICE_SECRET_KEY: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_SECRET }}
-          UNITY_ORGANIZATION_ID: ${{ secrets.UPM_ORG_ID }}
-          UNITY_ORG_ID: ${{ secrets.UPM_ORG_ID }}
-          DIST_DIR: /tmp/signed-upm-dist
-        run: |
-          package_json="${{ inputs.package_json_path }}"
-          package_dir="$(dirname "$package_json")"
-          mkdir -p "$DIST_DIR"
-          upm --log-level 5 pack "$package_dir" --organization-id "$UPM_ORG_ID" --destination "$DIST_DIR"
-
-          shopt -s nullglob
-          archives=("$DIST_DIR"/*.tgz "$DIST_DIR"/*.tar.gz)
-          if [ "${#archives[@]}" -ne 1 ]; then
-            printf 'Expected exactly one signed package archive, found %s\n' "${#archives[@]}" >&2
-            exit 1
-          fi
-
-          archive="${archives[0]}"
-          tar -tzf "$archive" | grep -qx 'package/package.json'
-          tar -tzf "$archive" | grep -qx 'package/.attestation.p7m'
-
-          archive_name="$(basename "$archive")"
-          cp "$archive" "artifacts/$archive_name"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
-          echo "archive_name=$archive_name" >> "$GITHUB_OUTPUT"
-          printf 'Signed UPM archive: %s\n' "$archive_name"
-          tar -xOzf "$archive" package/package.json | python -m json.tool
-
       - name: Generate release notes
         if: steps.tag.outputs.exists == 'false'
         shell: bash
@@ -205,9 +101,6 @@ jobs:
             echo "## Artifacts"
             echo
             echo "- Source archive"
-            if [ "${{ inputs.sign_upm_package }}" = "true" ]; then
-              echo "- Signed UPM package: ${{ steps.upm.outputs.archive_name }}"
-            fi
           } > release-notes.md
 
       - name: Create GitHub Release
