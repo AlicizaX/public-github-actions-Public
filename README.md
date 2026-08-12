@@ -14,6 +14,8 @@ Behavior:
 - Generates a source archive from the current commit.
 - Packs and signs a Unity UPM tarball with the Unity UPM CLI (`upm pack`) when
   `sign_upm_package` is enabled (default: `true`).
+- Stages a clean package copy under `$RUNNER_TEMP` before packing, so CI temp
+  files (`install-upm-cli.sh`, `artifacts/`, etc.) never enter the signed tarball.
 - Uploads both the source archive and the signed `.tgz` as release assets.
 - Builds release notes from commits since the previous tag, or from recent
   commits when no previous tag exists.

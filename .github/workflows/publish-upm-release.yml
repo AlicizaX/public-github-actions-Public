@@ -92,16 +92,32 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Prepare release directories
+        if: steps.tag.outputs.exists == 'false'
+        id: paths
+        shell: bash
+        run: |
+          # Keep all CI outputs outside the package tree so upm pack never
+          # picks up install scripts, artifacts, or other runner temp files.
+          artifacts_dir="${RUNNER_TEMP}/upm-release-artifacts"
+          stage_dir="${RUNNER_TEMP}/upm-package-src"
+          dist_dir="${RUNNER_TEMP}/signed-upm-dist"
+          mkdir -p "$artifacts_dir" "$stage_dir" "$dist_dir"
+          echo "artifacts_dir=$artifacts_dir" >> "$GITHUB_OUTPUT"
+          echo "stage_dir=$stage_dir" >> "$GITHUB_OUTPUT"
+          echo "dist_dir=$dist_dir" >> "$GITHUB_OUTPUT"
+
       - name: Build source artifact
         if: steps.tag.outputs.exists == 'false'
         shell: bash
         run: |
-          mkdir -p artifacts
           prefix="${{ inputs.source_prefix }}"
           if [ -z "$prefix" ]; then
             prefix="${{ steps.package.outputs.name }}"
           fi
-          git archive --format=zip --output="artifacts/${prefix}-${{ steps.package.outputs.version }}-source.zip" HEAD
+          git archive --format=zip \
+            --output="${{ steps.paths.outputs.artifacts_dir }}/${prefix}-${{ steps.package.outputs.version }}-source.zip" \
+            HEAD
 
       - name: Check UPM signing secrets
         if: steps.tag.outputs.exists == 'false' && inputs.sign_upm_package
@@ -127,8 +143,9 @@ jobs:
         if: steps.tag.outputs.exists == 'false' && inputs.sign_upm_package
         shell: bash
         run: |
-          curl -fsSL https://cdn.packages.unity.com/upm-cli/install.sh -o install-upm-cli.sh
-          bash install-upm-cli.sh
+          install_script="${RUNNER_TEMP}/install-upm-cli.sh"
+          curl -fsSL https://cdn.packages.unity.com/upm-cli/install.sh -o "$install_script"
+          bash "$install_script"
           echo "$HOME/.upm/bin" >> "$GITHUB_PATH"
 
       - name: Verify Unity UPM CLI
@@ -167,16 +184,48 @@ jobs:
           UGS_CLI_SERVICE_SECRET_KEY: ${{ secrets.UPM_SERVICE_ACCOUNT_KEY_SECRET }}
           UNITY_ORGANIZATION_ID: ${{ secrets.UPM_ORG_ID }}
           UNITY_ORG_ID: ${{ secrets.UPM_ORG_ID }}
-          DIST_DIR: /tmp/signed-upm-dist
+          ARTIFACTS_DIR: ${{ steps.paths.outputs.artifacts_dir }}
+          STAGE_DIR: ${{ steps.paths.outputs.stage_dir }}
+          DIST_DIR: ${{ steps.paths.outputs.dist_dir }}
         run: |
           package_json="${{ inputs.package_json_path }}"
           package_dir="$(dirname "$package_json")"
+          # Normalize "./foo" and "foo/." style paths for git archive.
+          package_dir="${package_dir#./}"
           if [ "$package_dir" = "." ]; then
-            package_dir="$PWD"
+            package_dir=""
           fi
 
-          mkdir -p "$DIST_DIR" artifacts
-          upm --log-level 5 pack "$package_dir" --organization-id "$UPM_ORG_ID" --destination "$DIST_DIR"
+          rm -rf "$STAGE_DIR"
+          mkdir -p "$STAGE_DIR" "$DIST_DIR" "$ARTIFACTS_DIR"
+
+          # Export only tracked package files into a clean staging directory.
+          # This excludes CI temp files (install scripts, artifacts/, etc.).
+          if [ -z "$package_dir" ]; then
+            git archive --format=tar HEAD | tar -x -C "$STAGE_DIR"
+          else
+            git archive --format=tar "HEAD:$package_dir" | tar -x -C "$STAGE_DIR"
+          fi
+
+          if [ ! -f "$STAGE_DIR/package.json" ]; then
+            echo "::error::Clean package stage is missing package.json"
+            ls -la "$STAGE_DIR" >&2 || true
+            exit 1
+          fi
+
+          # Drop VCS/CI metadata that should not ship inside the UPM tarball.
+          rm -rf \
+            "$STAGE_DIR/.git" \
+            "$STAGE_DIR/.github" \
+            "$STAGE_DIR/.gitignore" \
+            "$STAGE_DIR/.gitattributes" \
+            "$STAGE_DIR/artifacts" \
+            "$STAGE_DIR/install-upm-cli.sh"
+
+          printf 'Clean package stage contents:\n'
+          find "$STAGE_DIR" -maxdepth 2 -print | sort
+
+          upm --log-level 5 pack "$STAGE_DIR" --organization-id "$UPM_ORG_ID" --destination "$DIST_DIR"
 
           shopt -s nullglob
           archives=("$DIST_DIR"/*.tgz "$DIST_DIR"/*.tar.gz)
@@ -193,12 +242,20 @@ jobs:
           printf '%s\n' "$listing" | grep -qx 'package/package.json'
           printf '%s\n' "$listing" | grep -qx 'package/.attestation.p7m'
 
+          if printf '%s\n' "$listing" | grep -E 'package/(install-upm-cli\.sh|artifacts/)'; then
+            echo "::error::Signed package still contains CI temp files"
+            printf '%s\n' "$listing" >&2
+            exit 1
+          fi
+
           archive_name="$(basename "$archive")"
-          cp "$archive" "artifacts/$archive_name"
+          cp "$archive" "$ARTIFACTS_DIR/$archive_name"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "archive_name=$archive_name" >> "$GITHUB_OUTPUT"
           printf 'Signed UPM archive: %s\n' "$archive_name"
           tar -xOzf "$archive" package/package.json | python -m json.tool
+          printf 'Signed package file list:\n'
+          printf '%s\n' "$listing"
 
       - name: Generate release notes
         if: steps.tag.outputs.exists == 'false'
@@ -230,7 +287,7 @@ jobs:
           tag_name: ${{ steps.package.outputs.tag }}
           name: ${{ steps.package.outputs.version }}
           body_path: release-notes.md
-          files: artifacts/*
+          files: ${{ steps.paths.outputs.artifacts_dir }}/*
 
       - name: Delete old GitHub Releases
         if: steps.tag.outputs.exists == 'false' && inputs.keep_releases > 0
