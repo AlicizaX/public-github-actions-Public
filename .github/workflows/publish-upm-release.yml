@@ -187,8 +187,11 @@ jobs:
           fi
 
           archive="${archives[0]}"
-          tar -tzf "$archive" | grep -qx 'package/package.json'
-          tar -tzf "$archive" | grep -qx 'package/.attestation.p7m'
+          # Avoid `tar | grep -q` under pipefail: grep closes early and tar
+          # reports "stdout: write error" even when the package is valid.
+          listing="$(tar -tzf "$archive")"
+          printf '%s\n' "$listing" | grep -qx 'package/package.json'
+          printf '%s\n' "$listing" | grep -qx 'package/.attestation.p7m'
 
           archive_name="$(basename "$archive")"
           cp "$archive" "artifacts/$archive_name"
