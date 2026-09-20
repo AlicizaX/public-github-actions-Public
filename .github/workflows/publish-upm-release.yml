@@ -239,8 +239,8 @@ jobs:
           # Avoid `tar | grep -q` under pipefail: grep closes early and tar
           # reports "stdout: write error" even when the package is valid.
           listing="$(tar -tzf "$archive")"
-          printf '%s\n' "$listing" | grep -qx 'package/package.json'
-          printf '%s\n' "$listing" | grep -qx 'package/.attestation.p7m'
+          grep -qx 'package/package.json' <<< "$listing"
+          grep -qx 'package/.attestation.p7m' <<< "$listing"
 
           if printf '%s\n' "$listing" | grep -E 'package/(install-upm-cli\.sh|artifacts/)'; then
             echo "::error::Signed package still contains CI temp files"
