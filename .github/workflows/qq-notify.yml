@@ -1,0 +1,111 @@
+name: QQ 推送通知（可复用）
+
+# 由各仓库的 caller workflow 调用，本身不监听 push。
+# 需要的 Secrets（配在组织级，勾选目标仓库；调用方用 secrets: inherit 传入）：
+#   QQ_BOT_APPID    QQ 开放平台机器人的 AppID
+#   QQ_BOT_SECRET   AppSecret
+#   QQ_GROUP_OPENID 目标群的 group_openid（不是群号）
+on:
+  workflow_call:
+    secrets:
+      QQ_BOT_APPID:
+        required: false
+      QQ_BOT_SECRET:
+        required: false
+      QQ_GROUP_OPENID:
+        required: false
+
+permissions: {}
+
+jobs:
+  notify:
+    name: 发送 QQ 消息
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # 删除分支时不打扰
+    if: github.event.deleted != true
+    steps:
+      - name: 调用 QQ 机器人接口
+        shell: bash
+        env:
+          QQ_APPID: ${{ secrets.QQ_BOT_APPID }}
+          QQ_SECRET: ${{ secrets.QQ_BOT_SECRET }}
+          QQ_GROUP: ${{ secrets.QQ_GROUP_OPENID }}
+          REPO_FULL: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          PUSHER: ${{ github.actor }}
+          AUTHOR: ${{ github.event.head_commit.author.name }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+          COMMIT_ID: ${{ github.event.head_commit.id }}
+          COMPARE_URL: ${{ github.event.compare }}
+          COMMITS_JSON: ${{ toJSON(github.event.commits) }}
+        run: |
+          set -euo pipefail
+          export LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+          if [ -z "${QQ_APPID:-}" ] || [ -z "${QQ_SECRET:-}" ] || [ -z "${QQ_GROUP:-}" ]; then
+            echo "::warning::缺少 QQ_BOT_APPID / QQ_BOT_SECRET / QQ_GROUP_OPENID，跳过 QQ 推送"
+            exit 0
+          fi
+
+          # 1. 取 access_token（有效期约 2 小时，每次现取，不缓存）
+          token_req=$(python3 -c 'import json,os;print(json.dumps({"appId":os.environ["QQ_APPID"],"clientSecret":os.environ["QQ_SECRET"]}))')
+          token_resp=$(curl -sS --max-time 20 -X POST 'https://bots.qq.com/app/getAppAccessToken' \
+            -H 'Content-Type: application/json' --data-binary "$token_req") \
+            || { echo '::error::请求 access_token 失败（网络）'; exit 1; }
+          token=$(printf '%s' "$token_resp" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))') \
+            || { echo "::error::解析 access_token 失败：$token_resp"; exit 1; }
+          [ -n "$token" ] || { echo "::error::获取 access_token 失败：$token_resp"; exit 1; }
+
+          # 2. 组装消息
+          title=${HEAD_MSG:-}
+          title=${title%%$'\n'*}
+          title=$(printf '%s' "$title" | tr -s '[:space:]' ' ')
+          title=${title# }; title=${title% }
+          [ -n "$title" ] || title='（无提交说明）'
+          author=${AUTHOR:-${PUSHER:-未知}}
+          now=$(date -u -d '+8 hours' '+%m月%d日 %H:%M')
+
+          count=0
+          if [ -n "${COMMITS_JSON:-}" ]; then
+            count=$(printf '%s' "$COMMITS_JSON" | python3 -c 'import sys,json
+          try:
+              print(len(json.load(sys.stdin) or []))
+          except Exception:
+              print(0)') || count=0
+          fi
+
+          detail=''
+          if [ "$count" -gt 1 ] && [ -n "${COMPARE_URL:-}" ]; then
+            detail=$COMPARE_URL
+          elif [ -n "${COMMIT_ID:-}" ]; then
+            detail="https://github.com/${REPO_FULL}/commit/${COMMIT_ID}"
+          else
+            detail=${COMPARE_URL:-}
+          fi
+
+          content=$(printf '【%s】有新推送\n分支：%s\n作者：%s\n提交：%s\n时间：%s' \
+            "$REPO_FULL" "$BRANCH" "$author" "$title" "$now")
+          if [ "$count" -gt 1 ]; then
+            content=$(printf '%s\n%s' "$content" "本次共 ${count} 个提交")
+          fi
+          if [ -n "$detail" ]; then
+            content=$(printf '%s\n%s' "$content" "详情：${detail}")
+          fi
+
+          # 3. 发送（主动消息，不需要 msg_id；群里显示为机器人消息）
+          # ensure_ascii 默认转义成 \uXXXX，请求体是纯 ASCII，不受任何终端/管道编码影响
+          payload=$(CONTENT="$content" python3 -c 'import json,os;print(json.dumps({"content":os.environ["CONTENT"],"msg_type":0}))')
+          send_resp=$(curl -sS --max-time 20 -X POST "https://api.sgroup.qq.com/v2/groups/${QQ_GROUP}/messages" \
+            -H "Authorization: QQBot ${token}" \
+            -H 'Content-Type: application/json' \
+            --data-binary "$payload") \
+            || { echo '::error::发送请求失败（网络）'; exit 1; }
+
+          if printf '%s' "$send_resp" | python3 -c 'import sys,json;sys.exit(0 if json.load(sys.stdin).get("id") else 1)'; then
+            echo '已推送 QQ 通知'
+            echo "message_id: $(printf '%s' "$send_resp" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')"
+          else
+            echo "::error::QQ 推送失败：$send_resp"
+            exit 1
+          fi
