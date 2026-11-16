@@ -1,12 +1,20 @@
 name: QQ 推送通知（可复用）
 
-# 由各仓库的 caller workflow 调用，本身不监听 push。
-# 需要的 Secrets（配在组织级，勾选目标仓库；调用方用 secrets: inherit 传入）：
+# 由各仓库的 caller workflow 调用，本身不监听事件。两种用法：
+#   1) 不传 release_tag  -> 推送 commit 消息
+#   2) 传 release_tag    -> 推送发布消息（发布成功后调用）
+# 需要的 Secrets（配在组织级，调用方用 secrets: inherit 传入）：
 #   QQ_BOT_APPID    QQ 开放平台机器人的 AppID
 #   QQ_BOT_SECRET   AppSecret
 #   QQ_GROUP_OPENID 目标群的 group_openid（不是群号）
 on:
   workflow_call:
+    inputs:
+      release_tag:
+        description: "发布版本 tag；为空时发送提交通知，有值时发送发布通知"
+        required: false
+        type: string
+        default: ''
     secrets:
       QQ_BOT_APPID:
         required: false
@@ -31,6 +39,7 @@ jobs:
           QQ_APPID: ${{ secrets.QQ_BOT_APPID }}
           QQ_SECRET: ${{ secrets.QQ_BOT_SECRET }}
           QQ_GROUP: ${{ secrets.QQ_GROUP_OPENID }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
           REPO_FULL: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
           PUSHER: ${{ github.actor }}
@@ -66,36 +75,43 @@ jobs:
           author=${AUTHOR:-${PUSHER:-未知}}
           now=$(date -u -d '+8 hours' '+%m月%d日 %H:%M')
 
-          count=0
-          if [ -n "${COMMITS_JSON:-}" ]; then
-            count=$(printf '%s' "$COMMITS_JSON" | python3 -c 'import sys,json
+          if [ -n "${RELEASE_TAG:-}" ]; then
+            # 发布通知
+            content=$(printf '【%s】发布了 %s\n分支：%s\n提交：%s\n时间：%s\n发布页：https://github.com/%s/releases/tag/%s' \
+              "$REPO_FULL" "$RELEASE_TAG" "$BRANCH" "$title" "$now" "$REPO_FULL" "$RELEASE_TAG")
+          else
+            # 提交通知
+            count=0
+            if [ -n "${COMMITS_JSON:-}" ]; then
+              count=$(printf '%s' "$COMMITS_JSON" | python3 -c 'import sys,json
           try:
               print(len(json.load(sys.stdin) or []))
           except Exception:
               print(0)') || count=0
-          fi
+            fi
 
-          detail=''
-          if [ "$count" -gt 1 ] && [ -n "${COMPARE_URL:-}" ]; then
-            detail=$COMPARE_URL
-          elif [ -n "${COMMIT_ID:-}" ]; then
-            detail="https://github.com/${REPO_FULL}/commit/${COMMIT_ID}"
-          else
-            detail=${COMPARE_URL:-}
-          fi
+            detail=''
+            if [ "$count" -gt 1 ] && [ -n "${COMPARE_URL:-}" ]; then
+              detail=$COMPARE_URL
+            elif [ -n "${COMMIT_ID:-}" ]; then
+              detail="https://github.com/${REPO_FULL}/commit/${COMMIT_ID}"
+            else
+              detail=${COMPARE_URL:-}
+            fi
 
-          content=$(printf '【%s】有新推送\n分支：%s\n作者：%s\n提交：%s\n时间：%s' \
-            "$REPO_FULL" "$BRANCH" "$author" "$title" "$now")
-          if [ "$count" -gt 1 ]; then
-            content=$(printf '%s\n%s' "$content" "本次共 ${count} 个提交")
-          fi
-          if [ -n "$detail" ]; then
-            content=$(printf '%s\n%s' "$content" "详情：${detail}")
+            content=$(printf '【%s】有新推送\n分支：%s\n作者：%s\n提交：%s\n时间：%s' \
+              "$REPO_FULL" "$BRANCH" "$author" "$title" "$now")
+            if [ "$count" -gt 1 ]; then
+              content=$(printf '%s\n%s' "$content" "本次共 ${count} 个提交")
+            fi
+            if [ -n "$detail" ]; then
+              content=$(printf '%s\n%s' "$content" "详情：${detail}")
+            fi
           fi
 
           # 3. 发送（主动消息，不需要 msg_id；群里显示为机器人消息）
-          # ensure_ascii 默认转义成 \uXXXX，请求体是纯 ASCII，不受任何终端/管道编码影响
-          payload=$(CONTENT="$content" python3 -c 'import json,os;print(json.dumps({"content":os.environ["CONTENT"],"msg_type":0}))')
+          # ensure_ascii 默认转义成 \uXXXX，请求体是纯 ASCII；内容经管道按 UTF-8 显式解码，不依赖 locale
+          payload=$(printf '%s' "$content" | python3 -c 'import sys,json;print(json.dumps({"content":sys.stdin.buffer.read().decode("utf-8"),"msg_type":0}))')
           send_resp=$(curl -sS --max-time 20 -X POST "https://api.sgroup.qq.com/v2/groups/${QQ_GROUP}/messages" \
             -H "Authorization: QQBot ${token}" \
             -H 'Content-Type: application/json' \
